@@ -8,3 +8,10 @@ Barcode counts = raw mapped counts
 Read counts = UMI corrected version of barcode counts
 
 Transcript counts = poisson counting statistics corrected version of UMI corrected version
+
+# Scripts used for all analyses
+All code used follows the guidelines as outlined by the publishers of each package
+1. Quality control scRNAseq samples (run in R)
+2. Script integrated scRNAseq analysis (run in R)
+3. Script pySCENIC SF Treg (run in python using Jupyter notebook)
+4. Script TCRseq analysis (run in R)
