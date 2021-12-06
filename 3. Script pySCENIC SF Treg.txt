@@ -1,0 +1,284 @@
+pySCENIC protocol: SF Treg
+
+Outline: SCENIC workflow for selected scRNAseq experiment on synovial fluid CD4 Treg
+
+Dataset: SF Treg (SORT-seq)
+
+# Set maximum number of jobs for Scanpy.
+sc.settings.njobs = 32
+
+# Import the necessary modules and declare some constants
+import os
+import glob
+import pickle
+import re
+import pandas as pd 
+import numpy as np
+import scanpy as sc
+import loompy as lp
+import pandas.testing as tm
+import seaborn as sns
+import anndata as ad
+
+from functools import partial
+from collections import OrderedDict
+import operator as op
+from cytoolz import compose
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+from dask.diagnostics import ProgressBar
+
+from arboreto.utils import load_tf_names
+from arboreto.algo import grnboost2
+
+from pyscenic.rnkdb import FeatherRankingDatabase as RankingDatabase
+from pyscenic.utils import modules_from_adjacencies, load_motifs
+from pyscenic.prune import prune2df, df2regulons
+from pyscenic.aucell import aucell
+from pyscenic.transform import df2regulons
+from pyscenic.aucell import aucell
+from pyscenic.binarization import binarize
+from pyscenic.rss import regulon_specificity_scores
+from pyscenic.plotting import plot_binarization, plot_rss
+from pyscenic.export import export2loom, add_scenic_metadata
+
+from IPython.display import HTML, display
+from MulticoreTSNE import MulticoreTSNE as TSNE
+
+
+# set a working directory
+wdir = "pySCENIC/"
+os.chdir( wdir )
+
+RESOURCES_FOLDERNAME = "pySCENIC/Resources/"
+AUXILLIARIES_FOLDERNAME = "pySCENIC/Auxilliaries/"
+RESULTS_FOLDERNAME = "pySCENIC/Results/"
+FIGURES_FOLDERNAME = "pySCENIC/Figures/"
+
+sc.settings.figdir = FIGURES_FOLDERNAME
+
+def savesvg(fname: str, fig, folder: str=FIGURES_FOLDERNAME) -> None:
+    """
+    Save figure as vector-based SVG image format.
+    """
+    fig.tight_layout()
+    fig.savefig(os.path.join(folder, fname), format='svg')
+    
+def display_logos(df: pd.DataFrame, top_target_genes: int = 3, base_url: str = BASE_URL):
+    """
+    :param df:
+    :param base_url:
+    """
+    # Make sure the original dataframe is not altered.
+    df = df.copy()
+    
+    # Add column with URLs to sequence logo.
+    def create_url(motif_id):
+        return '<img src="{}{}.png" style="max-height:124px;"></img>'.format(base_url, motif_id)
+    df[("Enrichment", COLUMN_NAME_LOGO)] = list(map(create_url, df.index.get_level_values(COLUMN_NAME_MOTIF_ID)))
+    
+    # Truncate TargetGenes.
+    def truncate(col_val):
+        return sorted(col_val, key=op.itemgetter(1))[:top_target_genes]
+    df[("Enrichment", COLUMN_NAME_TARGETS)] = list(map(truncate, df[("Enrichment", COLUMN_NAME_TARGETS)]))
+    
+    MAX_COL_WIDTH = pd.get_option('display.max_colwidth')
+    pd.set_option('display.max_colwidth', -1)
+    display(HTML(df.head().to_html(escape=False)))
+    pd.set_option('display.max_colwidth', MAX_COL_WIDTH)    
+
+Auxilliary datasets
+# Downloaded fromm pySCENIC github repo: https://github.com/aertslab/pySCENIC/tree/master/resources
+HUMAN_TFS_FNAME = os.path.join(AUXILLIARIES_FOLDERNAME, 'lambert2018.txt')
+# Ranking databases. Downloaded from cisTargetDB: https://resources.aertslab.org/cistarget/
+RANKING_DBS_FNAMES = list(map(lambda fn: os.path.join(AUXILLIARIES_FOLDERNAME, fn),
+                       ['hg38__refseq-r80__500bp_up_and_100bp_down_tss.mc9nr.feather',
+                       'hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.feather']))
+# Motif annotations. Downloaded from cisTargetDB: https://resources.aertslab.org/cistarget/
+MOTIF_ANNOTATIONS_FNAME = os.path.join(AUXILLIARIES_FOLDERNAME, 'motifs-v9-nr.hgnc-m0.001-o0.0.tbl')
+
+Results created
+DATASET_ID = "SF_Treg_SORTseq"
+METADATA_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.metadata.csv'.format(DATASET_ID))
+EXP_MTX_QC_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.qc.tpm.csv'.format(DATASET_ID))
+ADJACENCIES_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.adjacencies.tsv'.format(DATASET_ID))
+MOTIFS_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.motifs.csv'.format(DATASET_ID))
+REGULONS_DAT_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.regulons.dat'.format(DATASET_ID))
+AUCELL_MTX_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.auc.csv'.format(DATASET_ID))
+BIN_MTX_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.bin.csv'.format(DATASET_ID))
+THR_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.thresholds.csv'.format(DATASET_ID))
+ANNDATA_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.h5ad'.format(DATASET_ID))
+LOOM_FNAME = os.path.join(RESULTS_FOLDERNAME, '{}.loom'.format(DATASET_ID))
+
+scRNA seq data
+# Import data file
+ex_matrix = pd.read_csv("pySCENIC/Resources/exprMat.txt", sep='\t', header=0, index_col=0).T
+ex_matrix.shape
+ex_matrix.head()
+ex_matrix.dtypes
+
+# Import metadata
+cellInfo = pd.read_csv("pySCENIC/Resources/CellInfo.csv", header=0, index_col=0)
+cellInfo
+cellInfo.dtypes
+
+adata = sc.AnnData(X=ex_matrix)
+adata.obs = cellInfo
+
+adata.raw = adata
+sc.pp.log1p(adata)
+adata
+
+cellInfo.dtypes
+cols = ['CellType']
+cellInfo[cols] = cellInfo[cols].astype('category')
+cellInfo.dtypes
+cellInfo.index.name = 'cell_id'
+cellInfo.reset_index(inplace=True)
+cellInfo
+
+adata.write_h5ad(ANNDATA_FNAME)  #Categorical dtypes are created.
+adata.to_df().to_csv(EXP_MTX_QC_FNAME)
+adata.obs
+
+
+SCENIC steps
+STEP 1: Gene regulatory network inference, and generation of co-expression modules
+Phase Ia: GRN inference using the GRNBoost2 algorithm
+
+For this step the CLI version of SCENIC is used. This step can be deployed on an High Performance Computing system. We use the counts matrix (without log transformation or further processing) from the loom file we wrote earlier. Output: List of adjacencies between a TF and its targets stored in ADJACENCIES_FNAME.
+
+!pyscenic grn {EXP_MTX_QC_FNAME} {HUMAN_TFS_FNAME} -o adjacencies.csv --num_workers 20
+adjacencies = pd.read_csv("pySCENIC/Results/adjacencies.tsv", index_col = False, sep= '\t')
+adjacencies.head()
+
+STEP 2-3: Regulon prediction aka cisTarget from CLI
+
+For this step the CLI version of SCENIC is used. This step can be deployed on an High Performance Computing system.
+
+Output: List of adjacencies between a TF and its targets stored in MOTIFS_FNAME.
+
+Here, we use the --mask_dropouts option, which affects how the correlation between TF and target genes is calculated during module creation. It is important to note that prior to pySCENIC v0.9.18, the default behavior was to mask dropouts, while in v0.9.18 and later, the correlation is performed using the entire set of cells (including those with zero expression). When using the modules_from_adjacencies function directly in python instead of via the command line, the rho_mask_dropouts option can be used to control this.
+
+DBS_PARAM = ' '.join(RANKING_DBS_FNAMES)
+import glob
+# ranking databases
+f_db_glob = "pySCENIC/Auxilliaries/*feather"
+f_db_names = ' '.join( glob.glob(f_db_glob) )
+
+# motif databases
+f_motif_path = "pySCENIC/Auxilliaries/motifs-v9-nr.hgnc-m0.001-o0.0.tbl"
+
+!pyscenic ctx adjacencies.csv \
+    {f_db_names} \
+    --annotations_fname {f_motif_path} \
+    --expression_mtx_fname {EXP_MTX_QC_FNAME} \
+    --output {MOTIFS_FNAME} \
+    --mask_dropouts \
+    --num_workers 20
+    
+df_motifs.head()
+
+
+STEP 4: Cellular enrichment (aka AUCell) from CLI
+
+It is important to check that most cells have a substantial fraction of expressed/detected genes in the calculation of the AUC. The following histogram gives an idea of the distribution and allows selection of an appropriate threshold. In this plot, a few thresholds are highlighted, with the number of genes selected shown in red text and the corresponding percentile in parentheses). See the relevant section in the R tutorial for more information.
+
+By using the default setting for --auc_threshold of 0.05, we see that 1192 genes are selected for the rankings based on the plot below.
+
+nGenesDetectedPerCell = np.sum(ex_matrix>0, axis=1)
+percentiles = nGenesDetectedPerCell.quantile([.01, .05, .10, .50, 1])
+print(percentiles)
+
+fig, ax = plt.subplots(1, 1, figsize=(8, 5), dpi=150)
+sns.distplot(nGenesDetectedPerCell, norm_hist=False, kde=False, bins='fd')
+for i,x in enumerate(percentiles):
+    fig.gca().axvline(x=x, ymin=0,ymax=1, color='red')
+    ax.text(x=x, y=ax.get_ylim()[1], s=f'{int(x)} ({percentiles.index.values[i]*100}%)', color='red', rotation=30, size='x-small',rotation_mode='anchor' )
+ax.set_xlabel('# of genes')
+ax.set_ylabel('# of cells')
+fig.tight_layout()
+
+# path to pyscenic output
+f_pyscenic_output = "pyscenic_output.loom"
+
+# path to loom file with filtering applied.
+f_loom_path_scenic = "filtered_scenic.loom"
+
+# create basic row and column attributes for the loom file:
+
+row_attrs = { 
+    "Gene": np.array(adata.var.index) ,
+}
+col_attrs = { 
+    "CellID":  np.array(adata.obs.index) ,
+    "nGene": np.array( np.sum(adata.X.transpose()>0 , axis=0)).flatten() ,
+    "nUMI": np.array( np.sum(adata.X.transpose() , axis=0)).flatten() ,
+}
+# create loom file:
+lp.create( f_loom_path_scenic, adata.X.transpose(), row_attrs, col_attrs )
+
+!pyscenic aucell \
+    {f_loom_path_scenic} \
+    {MOTIFS_FNAME} \
+    --output {f_pyscenic_output} \
+    --num_workers 20
+    
+STEP 5 - Regulon activity binarization
+
+bin_mtx, thresholds = binarize(auc_mtx)
+bin_mtx.to_csv(BIN_MTX_FNAME)
+thresholds.to_frame().rename(columns={0:'threshold'}).to_csv(THR_FNAME)
+
+bin_mtx = pd.read_csv(BIN_MTX_FNAME, index_col=0)
+thresholds = pd.read_csv(THR_FNAME, index_col=0).threshold
+
+
+Regulon specificity scores (RSS) across predicted cell types
+from pyscenic.rss import regulon_specificity_scores
+from pyscenic.plotting import plot_rss
+import matplotlib.pyplot as plt
+from adjustText import adjust_text
+import seaborn as sns
+from pyscenic.binarization import binarize
+
+rss_cellType = regulon_specificity_scores( auc_mtx, cellInfo['CellType'] )
+rss_cellType
+rss_cellType.to_excel ("pySCENIC/regulon specificity scores cell type.xlsx", index = True, header=True)
+
+rss_cellid = regulon_specificity_scores( auc_mtx, cellInfo['cell_id'] )
+rss_cellid
+rss_cellid.to_excel ("pySCENIC/regulon specificity scores cell id.xlsx", index = True, header=True)
+
+
+RSS panel plot with all cell types
+cats = sorted(list(set(cellInfo['CellType'])))
+fig = plt.figure(figsize=(15, 6))
+for c,num in zip(cats, range(1,len(cats)+1)):
+    x=rss_cellType.T[c]
+    ax = fig.add_subplot(1,5,num)
+    plot_rss(rss_cellType, c, top_n=5, max_n=None, ax=ax)
+    ax.set_ylim( x.min()-(x.max()-x.min())*0.05 , x.max()+(x.max()-x.min())*0.05 )
+    for t in ax.texts:
+        t.set_fontsize(12)
+    ax.set_ylabel('')
+    ax.set_xlabel('')
+    adjust_text(ax.texts, autoalign='xy', ha='right', va='bottom', arrowprops=dict(arrowstyle='-',color='lightgrey'), precision=0.001 )
+ 
+fig.text(0.5, 0.0, 'Regulon', ha='center', va='center', size='x-large')
+fig.text(0.00, 0.5, 'Regulon specificity score (RSS)', ha='center', va='center', rotation='vertical', size='x-large')
+plt.tight_layout()
+plt.rcParams.update({
+    'figure.autolayout': True,
+        'figure.titlesize': 'large' ,
+        'axes.labelsize': 'medium',
+        'axes.titlesize':'large',
+        'xtick.labelsize':'medium',
+        'ytick.labelsize':'medium'
+        })
+plt.savefig("SFTreg_cellType-RSS-top5.pdf", dpi=600, bbox_inches = "tight")
+plt.show()
+
+

@@ -1,0 +1,131 @@
+#### Load packages ####
+library(Seurat)
+library(scde)
+library(cowplot)
+library(SCTransform)
+library(scRepertoire)
+library(ggthemes)
+library(openxlsx)
+library(circlize)
+library(scales)
+
+#### Load data #####
+## Data was downloaded from the GEO database
+# Load data (run for every patient dataset)
+load("pat1_sf.RData")
+XX001SF <- SO1
+XX001SF <- UpdateSeuratObject(XX007SF)
+XX001SF <- DietSeurat(XX001SF, counts = TRUE, data = TRUE, scale.data = FALSE) 
+
+# Add identity 
+patient <- replicate(xx, "XX001")
+XX001SF <- AddMetaData(object = XX001SF, metadata = patient, col.name = "patient")
+XX001SF <- SetIdent(XX001SF, value = "identity")
+
+# Add percent mito and percent ribosomal genes to metadata
+XX001SF <- PercentageFeatureSet(XX001SF, pattern = "^MT-", col.name = "percent.mt")
+XX001SF <- PercentageFeatureSet(XX001SF, pattern = "^RP", col.name = "percent.ribo")
+
+# Visualize QC metrics 
+pdf(file="XX001SF_before QC.pdf", width = 16, height = 8)
+VlnPlot(XX001SF, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), ncol = 4)
+dev.off()
+
+# Check filtering to be set
+selected <- WhichCells(XX001SF, expression = percent.mt < 10 & nFeature_RNA > 200 & nFeature_RNA < 4000 & nCount_RNA < 15000)
+length(selected) 
+
+# Filter cells
+XX007SF <- subset(XX001SF, subset = percent.mt < 10 & nFeature_RNA > 200 & nFeature_RNA < 4000 & nCount_RNA < 15000)
+
+pdf(file="XX001SF_after QC.pdf", width = 16, height = 8)
+VlnPlot(XX001SF, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.ribo"), ncol = 4)
+dev.off()
+
+#### SCtranform ####
+# see 'Quality control scRNAseq samples'
+
+#### Perform Integration of the SF samples ####
+# see 'Script integrated scRNAseq analysis'
+
+#### Visualization ####
+# see 'Script integrated scRNAseq analysis'
+
+#### MAST test differential gene expression ####
+# see 'Script integrated scRNAseq analysis'
+
+#### TCR-seq analyses clustering ####
+## Separate the dataset per patient
+XXSF1 <- subset(XXSF, subset = patient == "XX001")
+XXSF2 <- subset(XXSF, subset = patient == "XX002")
+XXSF3 <- subset(XXSF, subset = patient == "XX003")
+XXSF4 <- subset(XXSF, subset = patient == "XX004")
+XXSF5 <- subset(XXSF, subset = patient == "XX005")
+XXSF6 <- subset(XXSF, subset = patient == "XX006")
+XXSF7 <- subset(XXSF, subset = patient == "XX007")
+
+## Color on not-enriched and enriched clones
+x <- DimPlot(object = XXSF1, reduction = "umap", group.by = "enrClones", label = FALSE)
+ggsave(x, file="XX001 UMAP enriched clones.svg")
+
+x <- DimPlot(object = XXSF, reduction = "umap", split.by = "enrClones", label = TRUE)
+ggsave(x, file="UMAP enriched clones.svg", width = 24)
+
+## Run scRepertoire
+# Order clonotype level
+slot(XXSF, "meta.data")$cloneType <- factor(slot(XXSF, "meta.data")$cloneType, 
+                                              levels = c("NA", "Single (0 < X <= 1)", 
+                                                         "Small (1 < X <= 5)", 
+                                                         "Medium (5 < X <= 20)", 
+                                                         "Large (20 < X <= 100)",
+                                                         "Hyperexpanded (100 < X <= 500)"))
+colorblind_vector <- colorRampPalette(c("#0348A6", "#7AC5FF", "#C6FDEC","#FFB433","#FF4B20"))
+
+slot(XXSF, "meta.data")$cloneType <- factor(slot(XXSF, "meta.data")$cloneType, 
+                                              levels = c("Hyperexpanded (100 < X <= 500)", 
+                                                         "Large (20 < X <= 100)", 
+                                                         "Medium (5 < X <= 20)", 
+                                                         "Small (1 < X <= 5)", 
+                                                         "Single (0 < X <= 1)", NA))
+colorblind_vector <- colorRampPalette(c("#FF4B20", "#FFB433", "#C6FDEC", "#7AC5FF", "#0348A6"))
+
+# Distribution of clonal expansion 
+occupiedscRepertoire(XXSF, x.axis = "cluster")
+clonotypetable <- occupiedscRepertoire(XXSF, x.axis = "cluster", exportTable = TRUE)
+write.xlsx(clonotypetable, file = "Clonotype table per cluster frequency.xlsx")
+
+# Distribution of the clonotype bins
+DimPlot(XXSF, group.by = "cloneType", pt.size = 1, order = TRUE) +
+  scale_color_manual(values = colorblind_vector(5), na.value="grey")
+
+# Use scRepertoire based on clustering
+XXSF <- expression2List(XXSF, group = "XXSF_clusters")
+
+# clonal diversity
+clonalDiversity(XXSF, cloneCall = "nt")
+clonalDiversity(XXSF, cloneCall = "nt", chain = "TRB")
+clonalDiversity(XXSF, cloneCall = "nt", chain = "TRA")
+
+# Clonal homeostasis
+clonalHomeostasis(XXSF, cloneCall = "nt")
+clonalHomeostasis(XXSF, cloneCall = "nt", cloneTypes = c(Rare = 1e-4, Small = 0.001, Medium = 0.01, Large = 0.1, Hyperexpanded
+                                                            = 1))
+clonalHomeostasis(XXSF, cloneCall = "nt", cloneTypes = c(Rare = 0.001, Small = 0.005, Medium = 0.01, Large = 0.02, Hyperexpanded
+                                                              = 1))
+
+clonalHomeostasis(XXSF, cloneCall = "nt", chain = "TRB")
+clonalHomeostasis(XXSF, cloneCall = "nt", chain = "TRA")
+
+# Clonal proportion
+clonalProportion(combined, cloneCall = "nt", split = c(5, 20, 100, 500, 1000, 5000))
+clonalProportion(XXSF, cloneCall = "nt", chain = "TRB")
+clonalProportion(XXSF, cloneCall = "nt", chain = "TRA")
+
+# Clonal overlap
+clonalOverlap(XXSF, cloneCall="nt", method="overlap")
+clonalOverlap(XXSF, cloneCall="nt", method="overlap", chain = "TRB")
+clonalOverlap(XXSF, cloneCall="nt", method="overlap", chain = "TRA")
+
+clonalOverlap(XXSF, cloneCall="gene", method="overlap")
+clonalOverlap(XXSF, cloneCall="gene", method="overlap", chain = "TRB")
+clonalOverlap(XXSF, cloneCall="gene", method="overlap", chain = "TRA")

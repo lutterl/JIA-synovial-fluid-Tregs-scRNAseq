@@ -1,0 +1,327 @@
+#### Loading required packages ####
+library('Seurat')
+library('dplyr')
+library('gridExtra')
+library('scater')
+library("limSolve")
+library('scran')
+library('mvoutlier')
+library('sctransform')
+library('ggplot2')
+
+#### LOAD DATA ####
+# reading in UMI count table
+rawData <- read.table("xx.BarcodeCounts.tsv", header = TRUE)
+# remove chromosomal annotation
+rawData$GENEID <- gsub("__chr.*", "", rawData$GENEID)
+# set rownames 
+rownames(rawData)=rawData[,1]
+rawData=rawData[,-1]
+rawData <-as.matrix(rawData)
+# remove the last 8 columns that contain only the spike ins 
+rawData <- rawData[,-c(377:384)]
+
+# remove the spike ins from the gene list
+spikein <- grepl("ERCC", rownames(rawData))
+sum(spikein)
+grep('ERCC', rownames(rawData))
+rownames(rawData)[grep('ERCC', rownames(rawData))]
+length(rownames(rawData)[grep('ERCC', rownames(rawData))]) # gives rows with ERCC somewhere in the name
+length(rownames(rawData)[grep('^ERCC', rownames(rawData))]) # gives rows with ERRC at the start of the name
+rawData <- rawData[-grep('ERCC', rownames(rawData)),]
+
+#### Quality controls ####
+XX001 <-SingleCellExperiment(list(counts=rawData))
+dim(XX001) 
+# Get spike inns
+is.spike <- grepl("ERCC", rownames(XX001))
+sum(is.spike)
+# Get mitochondrial genes
+is.mito <- grepl("^MT-", rownames(XX001))
+sum(is.mito)
+rawData[is.mito,]
+# Get ribosomal genes 
+is.ribo <- grepl("^RP", rownames(XX001))
+sum(is.ribo) 
+
+## Calculate QC metrics 
+XX001 <- calculateQCMetrics(XX001, feature_controls=list(Mt=is.mito))
+dim(colData(XX001))
+colnames(colData(XX001))
+
+## Create metaData matrix
+metaData<-data.frame("staticNr"=colnames(rawData),"nGene"=XX001$total_features_by_counts,
+                     "nUMI"=XX001$total_counts,"percent.mito"=XX001$pct_counts_Mt, 
+                     stringsAsFactors = F)
+rownames(metaData)<-metaData$staticNr
+metaData$staticNr<-1
+head(metaData)
+tail(metaData)
+
+## Get outliers
+# same as nGene in Seurat pipeline
+feature.drop <- isOutlier(XX001$total_features_by_counts, nmads=3, type="lower", log=TRUE) == TRUE
+sum(feature.drop) 
+featurehigh.drop <- isOutlier(XX001$total_features_by_counts, nmads=3, type="higher", log=TRUE) == TRUE
+sum(featurehigh.drop) 
+# same as UMI in Seurat pipeline
+libsize.drop <- isOutlier(XX001$total_counts, nmads=3, type="lower", log=TRUE)
+sum(libsize.drop) 
+libsizehigh.drop <- isOutlier(XX001$total_counts, nmads=3, type="higher", log=TRUE)
+sum(libsizehigh.drop)
+# same as MT in Seurat pipeline
+mito.drop <- isOutlier(XX001$pct_counts_Mt, nmads=3, type="higher")
+sum(mito.drop) 
+
+## Add outlier information to metaData matrix
+metaData$nGene.drop=feature.drop
+metaData$nUMI.drop=libsize.drop
+metaData$mito.drop=mito.drop
+metaData$preproc.drop=feature.drop | libsize.drop | mito.drop
+
+head(metaData)
+metaData[metaData$mito.drop == TRUE,]
+metaData[metaData$nGene.drop == TRUE,]
+metaData[metaData$nUMI.drop == TRUE,]
+
+## Create QC histogram + barplot
+palette(c("#00BFC4","#F8766D","#7CAE00","#C77CFF"))
+toPlot<-metaData
+
+# nGene
+png(file="pre_nGene.png", width=850)
+par(mfrow=c(1,2))
+tmp<-toPlot[order(toPlot$nGene),]
+hist(tmp$nGene, breaks=30)
+theColors<-as.factor(tmp$nGene.drop)
+barplot(tmp$nGene, col=theColors, border=theColors)
+dev.off()
+
+# nUMI
+png(file="pre_nUMI.png", width=850)
+par(mfrow=c(1,2))
+tmp<-toPlot[order(toPlot$nUMI),]
+hist(tmp$nUMI, breaks=30)
+theColors<-as.factor(tmp$nUMI.drop)
+barplot(tmp$nUMI, col=theColors, border=theColors)
+dev.off()
+
+# percent.mito
+png(file="pre_percMito.png", width=850)
+par(mfrow=c(1,2))
+tmp<-toPlot[order(toPlot$percent.mito),]
+hist(tmp$percent.mito, breaks=30)
+theColors<-as.factor(tmp$mito.drop)
+barplot(tmp$percent.mito, col=theColors, border=theColors)
+dev.off()
+
+## Create QC violinPlots
+# Before filtering
+toPlot <- metaData
+fileName<-"pre_Filtering.png"
+
+# After filtering
+toPlot<-metaData[! metaData$preproc.drop,]
+fileName<-"post_Filtering.png"
+
+p_nGene <- ggplot(toPlot, aes(staticNr, nGene)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=nGene.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+p_nUMI <- ggplot(toPlot, aes(staticNr, nUMI)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=nUMI.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+p_mito <- ggplot(toPlot, aes(staticNr, percent.mito)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=mito.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+grid.arrange(p_nGene, p_nUMI,p_mito, ncol=3)
+ggsave(grid.arrange(p_nGene, p_nUMI,p_mito, ncol=3),file=fileName)
+
+## Remove outliers
+XX001 <- XX001[,!(libsize.drop | feature.drop | mito.drop)]
+dim(XX001)
+
+## PCA-based outlier removal
+# detect bad cells
+XX001try <- runPCA(XX001, use_coldata = T, detect_outliers = T)
+table(XX001try$outlier)
+outs <-colnames(XX001try)[XX001try$outlier]
+
+# Add to metaData
+metaData$pca.drop<-metaData$preproc.drop
+metaData[outs,which(colnames(metaData)=="pca.drop")]<-TRUE
+metaData[metaData$pca.drop == TRUE,]
+
+# Color bad cells on PCA plot
+colorDF<-as.data.frame(cbind(colnames(XX001try),"1"), stringsAsFactors=F)
+rownames(colorDF)<-colorDF[,1]
+colorDF[outs,2]<-"2"
+colorDF[,2]<-as.factor(colorDF[,2])
+tmp<-colorDF[,2,drop=F]
+png(file="pca outliers.png",  width = 850, height = 642)
+plotReducedDim(XX001try, use_dimred = "PCA_coldata", colour_by='outlier',shape_by='outlier') + labs(title="PCA with outliers colored")
+dev.off()
+
+# Add to metaData table
+pca.drop<-metaData[colnames(XX001try),"pca.drop"]
+sum(pca.drop)
+
+## Create vlnPlot
+# before removing PCA outliers
+pca.drop<-metaData[colnames(XX001),"pca.drop"]
+sum(pca.drop)
+
+toPlot<-metaData[! metaData$preproc.drop,]
+fileName<-"beforePcaFiltering.png"
+
+p_nGene <- ggplot(toPlot, aes(staticNr, nGene)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=pca.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+p_nUMI <- ggplot(toPlot, aes(staticNr, nUMI)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=pca.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+p_mito <- ggplot(toPlot, aes(staticNr, percent.mito)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=pca.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+grid.arrange(p_nGene, p_nUMI,p_mito, ncol=3)
+ggsave(grid.arrange(p_nGene, p_nUMI,p_mito, ncol=3),file=fileName)
+
+# after removing PCA outliers
+toPlot<-metaData[! metaData$pca.drop,]
+fileName<-"afterPcaFiltering.png"
+
+p_nGene <- ggplot(toPlot, aes(staticNr, nGene)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=nGene.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+p_nUMI <- ggplot(toPlot, aes(staticNr, nUMI)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=nUMI.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+p_mito <- ggplot(toPlot, aes(staticNr, percent.mito)) + 
+  geom_violin(fill="gray80") + 
+  geom_jitter(height = 0, width = 0.3, aes(col=mito.drop)) +
+  scale_color_manual(values=c("#00BFC4", "#F8766D"))
+
+grid.arrange(p_nGene, p_nUMI,p_mito, ncol=3)
+ggsave(grid.arrange(p_nGene, p_nUMI,p_mito, ncol=3),file=fileName)
+
+## Remove PCA outliers
+XX001 <- XX001try[,!(pca.drop)]
+dim(XX001)
+
+## QC: GENES
+ave.counts <- calcAverage(XX001)
+png(file="QCgenes.png", width = 850, height = 642)
+hist(log10(ave.counts), breaks=100, main="", col="grey80", xlab=expression(Log[10]~"average count"))
+abline(v=-2.9,col="blue",lwd=2,lty=2)
+dev.off()
+
+cutoff<-10^-2.9
+demo.keep <- ave.counts >= cutoff
+filtered.XX001 <- XX001[demo.keep,]
+summary(demo.keep) 
+
+XX001 <-filtered.XX001
+
+## Finalize QC
+rawDataFiltered <-rawData[rownames(XX001),colnames(XX001)]
+dim(rawDataFiltered)
+class(rawDataFiltered)
+
+#### Create Seurat object ####
+XX001 <- CreateSeuratObject(rawDataFiltered, project = "XX001", min.cells = 3)
+dim(XX001@assays$RNA)
+# Add percent-mito and percent-ribosomal genes to metadata)
+XX001 <- PercentageFeatureSet(XX001, pattern = "^MT-", col.name = "percent.mt")
+XX001 <- PercentageFeatureSet(XX001, pattern = "^RP", col.name = "percent.ribo")
+head(XX001@meta.data)
+
+save(XX001, file = "XX001.Robj")
+
+#### SCtranform ####
+# Full regression for cell cycle 
+XX001 <- NormalizeData(XX001, normalization.method = "LogNormalize", scale.factor = 10000)
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+XX001 <- CellCycleScoring(object = XX001, s.features = s.genes, g2m.features = g2m.genes, 
+                          set.ident = FALSE)
+head(x = XX001@meta.data)
+
+# Run SCTransform 
+all.genes <- rownames(x = XX001)
+XX001 <- SCTransform(object = XX001, assay = "RNA", do.correct.umi = TRUE, 
+                     variable.features.n = all.genes, verbose = TRUE, 
+                     vars.to.regress = c("percent.mt", "S.Score", "G2M.Score"),
+                     conserve.memory = FALSE, return.only.var.genes = FALSE)
+
+# Run PCA
+xXX001 <- RunPCA(XX001, assay = "SCT", verbose = TRUE, npcs = 50)
+# Run dimensionality reduction
+xXX001 <- RunUMAP(xXX001, assay = "SCT", dims = 1:13, verbose = TRUE)
+
+# Construct a shared nearest neighbor graph
+xXX001 <- FindNeighbors(xXX001, dims = 1:13, verbose = TRUE)
+xXX001 <- FindClusters(xXX001, resolution = 0.6, verbose = TRUE)
+
+# Plot the identified clusters - set the group.by according to the resolution used
+pdf(file = "1xXX001UMAPres0.6.pdf", height = 10, width = 14)
+DimPlot(xXX001, label = TRUE, group.by = "SCT_snn_res.0.6") + NoLegend()
+dev.off()
+
+# Plot the umap and color by cell cycle phase (to assess if correction is needed)
+# first have to perform line 506-520 to assign cell cycle scores
+pdf(file = "xXX001UMAPres0.6phase.pdf", height = 10, width = 14)
+DimPlot(xXX001, label = FALSE, group.by = "Phase")
+dev.off()
+
+# Order defined clusters based on phylogenetic analysis of identity classes
+xXX001 <- BuildClusterTree(xXX001, reorder = TRUE, reorder.numeric = TRUE,dims = 1:30,
+                           verbose = TRUE)
+Tool(xXX001, slot = "BuildClusterTree")
+PlotClusterTree(xXX001)
+DimPlot(xXX001, label = TRUE, group.by = "tree.ident") + NoLegend()
+
+### regress for cell cycle (not integrated in sctranform (yet)) ###
+# Read in a list of cell cycle markers, from Tirosh et al, 2015
+cc.genes <- readLines(con = "regev_lab_cell_cycle_genes.txt")
+# Segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes[1:43]
+g2m.genes <- cc.genes[44:97]
+
+XX001 <- SetIdent(XX001, value = "orig.ident")
+
+# Assign cell cycle scores to the cells 
+XX001 <- CellCycleScoring(object = XX001, s.features = s.genes, g2m.features = g2m.genes, 
+                                    set.ident = TRUE)
+head(x = XX001@meta.data)
+
+# Visualize the distribution of cell cycle markers across the cells
+pdf(file="cellcyclegenes.pdf", height = 6, width = 8)
+RidgePlot(object = XX001, features = c("PCNA", "MKI67", "MCM6", "TOP2A"), 
+          ncol = 2)
+dev.off()
+
+# regress for cell cycle by scaling it on the already scaled data (work around untill the code is udpated)
+## Partial (difference within proliferating cells)
+XX001@meta.data$CC.Difference <- XX001@meta.data$S.Score - XX001@meta.data$G2M.Score
+scale.data <- XX001[["SCT"]]@scale.data
+scale.data <- ScaleData(scale.data, features = NULL, vars.to.regress = "CC.Difference", latent.data = XX001@meta.data[, c("S.Score", "G2M.Score")]) 
+XX001 <-  SetAssayData(XX001, slot="scale.data", new.data=scale.data)
+save(XX001, file = 'XX001SCT.Robj')
+
+### Run integration on all plates
+

@@ -1,0 +1,512 @@
+#### Load required packages ####
+library(Seurat)
+library(scde)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(RColorBrewer)
+library(cowplot)
+library(Nebulosa)
+library(dplyr)
+library(ggpubr)
+library(openxlsx)
+library(AUCell)
+library(monocle3)
+library(leidenbase)
+
+#### Integrate datasets after quality control #####
+load(file="XX001SCT.Robj")
+load(file="XX002SCT.Robj")
+load(file="XX003SCT.Robj")
+
+# Set ident to patient/project name
+XX001 <- SetIdent(XX001, value = "orig.ident")
+XX002 <- SetIdent(XX002, value = "orig.ident")
+XX003 <- SetIdent(XX003, value = "orig.ident")
+
+integrate.list <-objects()
+integrate.list$XX001 <- XX001
+integrate.list$XX002 <- XX002
+integrate.list$XX003 <- XX003
+
+# Identify anchors 
+reference.list <- integrate.list[c("XX001", "XX002", "XX003")]
+all.genes <- rownames(x = integrate.list)
+integrate.features <- SelectIntegrationFeatures(object.list = reference.list, nfeatures = 11933)
+reference.list <- PrepSCTIntegration(object.list = reference.list, anchor.features = integrate.features, 
+                                    verbose = TRUE)
+integrate.anchors <- FindIntegrationAnchors(object.list = reference.list, normalization.method = "SCT", 
+                                           anchor.features = integrate.features, verbose = TRUE)
+XX.integrated <- IntegrateData(anchorset = integrate.anchors, normalization.method = "SCT", 
+                                     verbose = TRUE)
+save(XX.integrated, file = "XX.integrated.Robj")
+
+XX001.2.3 <- XX.integrated
+DefaultAssay(object = XX001.2.3) <- "integrated"
+
+#### Clustering ####
+XX001.2.3 <- RunPCA(XX001.2.3, verbose = TRUE)
+XX001.2.3 <- RunUMAP(XX001.2.3, dims = 1:30)
+
+# Check for cell cycle, original identity (batch), nCount_RNA, nFeature_RNA, percent.mt, percent.ribo
+plots <- DimPlot(XX001.2.3, group.by = c("nCount_RNA", "nFeature_RNA"), combine = FALSE)
+plots <- lapply(X = plots, FUN = function(x) x + theme(legend.position = "top") + guides(color = guide_legend(nrow = 3, 
+                                                                                                              byrow = TRUE, override.aes = list(size = 3))))
+pdf(file="XX001.2.3_UMAPs QC.pdf", width = 14, height = 8)
+CombinePlots(plots)
+dev.off()
+
+XX001.2.3 <- FindNeighbors(object = XX001.2.3, reduction = "pca", dims = 1:30)
+XX001.2.3 <- FindClusters(object = XX001.2.3, resolution = 0.8)
+
+#### Visualization ####
+p1 <- DimPlot(object = XX001.2.3, reduction = "umap", group.by = "tree.ident", label = FALSE)
+p2 <- DimPlot(object = XX001.2.3, reduction = "umap")
+p3 <- DimPlot(object = XX001.2.3, reduction = "umap", group.by = "Phase", label = TRUE)
+plot_grid(p1, p2, p3)
+ggsave(grid.arrange(p1, p2, p3, ncol=3), file="UMAPs integrated.png", width = 20)
+
+# Remove ambiguous cluster from the analysis
+XX001.2.3 <- subset(XX001.2.3,  subset = integrated_snn_res.0.8 == "1", invert = TRUE)
+
+# Order clusters based on phylogenetic analysis of identity classes
+XX001.2.3 <- BuildClusterTree(XX001.2.3, reorder = TRUE, reorder.numeric = FALSE, dims = 1:30,
+                         verbose = TRUE)
+# Reorder and relevel the clustering to the phenotypical tree
+XX001.2.3@meta.data$integrated_snn_res.0.8 <- factor(XX001.2.3@meta.data$integrated_snn_res.0.8 , levels=c("4", "3", "2", "0"))
+levels(XX001.2.3@meta.data$integrated_snn_res.0.8) <- c("1", "2", "3", "4")
+
+# Extract used colors for the UMAP
+p2 <- DimPlot(object = XX001.2.3, reduction = "umap")
+pbuild <- ggplot2::ggplot_build(p2)
+pdata <- pbuild$data[[1]]
+pdata <-  pdata[order(pdata$group), ]
+ucols <- unique(pdata$colour)
+names(ucols) <- unique(pdata$group)
+ucols
+
+#1         2         3         4 
+#"#F8766D" "#7CAE00" "#00BFC4" "#C77CFF" 
+
+#### Barplots distribution #### 
+# Basic plot of clusters by sample, using counts
+b1 <- ggplot(XX001.2.3@meta.data, aes(x=orig.ident, fiXX=integrated_snn_res.0.8)) + theme_classic() +
+  geom_bar() + xlab("Patient") + ylab("Cell count") + labs(fill = "Cluster")
+ggsave(b1, file = "Frequencyplot.svg", width = 4, height = 6)
+
+b2 <- ggplot(XX001.2.3@meta.data, aes(x=orig.ident, fiXX=integrated_snn_res.0.8)) + theme_classic() +
+  geom_bar(position = "fill") + xlab("Patient") + ylab("Fraction") + labs(fill = "Cluster")
+ggsave(b2, file = "Proportionplot.svg", width = 4, height = 6)
+
+#### Control (QC) plots ####
+# Cell cycle phase
+pdf(file="XX001.2.3 cell cycle.pdf", height = 6, width = 8)
+DimPlot(XX001.2.3, label=T, group.by = "Phase", label.size = 4, pt.size = 0.5,
+        cols = c("indianred2", "seagreen3", "skyblue3"))
+dev.off()
+# Percentage of mitochrondrial genes
+pdf(file="XX001.2.3 percent mito.pdf", height = 6, width = 8)
+DimPlot(XX001.2.3, label= F, group.by = "percent.mt", pt.size = 1,
+        cols = rev("heat.colors"(980))) + NoLegend()
+dev.off()
+# Number of genes
+pdf(file="XX001.2.3 nFeature.pdf", height = 6, width = 8)
+DimPlot(XX001.2.3, label= FALSE, group.by = "nFeature_SCT", pt.size = 1, 
+        cols = rev("heat.colors"(980))) + NoLegend()
+dev.off()
+# Number of UMI's
+pdf(file="XX001.2.3 nCount.pdf", height = 6, width = 8)
+DimPlot(XX001.2.3, label= FALSE, group.by = "nCount_SCT", pt.size = 1, 
+        cols = rev("heat.colors"(980))) + NoLegend()
+dev.off()
+# Percentage of ribosomal genes ##
+pdf(file="XX001.2.3 percent ribo.pdf", height = 6, width = 8)
+DimPlot(XX001.2.3, label= FALSE, group.by = "percent.ribo", pt.size = 1, 
+        cols = rev("heat.colors"(980))) + NoLegend()
+dev.off()
+
+pdf(file="XX001.2.3 violin plots metadata.pdf", height = 10, width = 12)
+VlnPlot(object = XX001.2.3, features = c("nCount_SCT", "nFeature_SCT", "percent.mt", "percent.ribo"), ncol = 2, group.by = "tree.ident")
+dev.off()
+
+#### Statistics QC data clusters ####
+# Extract metadata
+my_data <- XX001.2.3@meta.data
+
+my_data$ratio <- my_data[, 2]/my_data[, 3]
+# OR (both options work)
+ratio = my_data$nCount_RNA / my_data$nFeature_RNA
+my_data$ratio <- ratio
+
+# Extract overview per metadata characteristic per cluster (nCount, nFeature, percent.mt, percent.ribo, G2M.Score, S.Score)
+group_by(my_data, tree.ident) %>%
+  summarise(
+    count = n(),
+    mean = mean(G2M.Score, na.rm = TRUE),
+    sd = sd(G2M.Score, na.rm = TRUE),
+    median = median(G2M.Score, na.rm = TRUE),
+    IQR = IQR(G2M.Score, na.rm = TRUE)
+  )
+
+group_by(my_data, tree.ident) %>%
+  summarise(
+    count = n(),
+    mean = mean(ratio, na.rm = TRUE),
+    sd = sd(ratio, na.rm = TRUE),
+    median = median(ratio, na.rm = TRUE),
+    IQR = IQR(ratio, na.rm = TRUE)
+  )
+
+# Barplots of the data 
+ggboxplot(my_data, x = "integrated_snn_res.0.8", y = "ratio", 
+          color = "integrated_snn_res.0.8", legend = "none",
+          ylab = "UMI/gene count", xlab = "Cluster")
+
+# Kruskal Wallis test
+kruskal.test(ratio ~ integrated_snn_res.0.8, data = my_data)
+# If there is a difference a pairwise wilcoxon to test for which groups differ (Benjamini Hochberg correction)
+pairwise.wilcox.test(my_data$ratio, my_data$tree.ident,
+                     p.adjust.method = "BH")
+
+XX001.2.3@meta.data$ratio <- ratio
+max(XX001.2.3@meta.data$ratio)
+q <- ggplot(data = XX001.2.3@meta.data, aes(x=integrated_snn_res.0.8, y=ratio, fill = integrated_snn_res.0.8)) + 
+  geom_boxplot() + 
+  stat_compare_means(method = "kruskal.test", label.y = 10, size = 2.5)+
+  stat_compare_means(comparisons = list( c('1', '2'), c('1', '3'), c('1', '4'), 
+                                         c('2', '3'), c('2', '4'), c('3', '4'))
+                                         , method = "wilcox.test", size = 2.5, 
+                     label = "p.format", p.adjust.method = "BH") +
+  theme_classic() + xlab("Cluster") + ylab("UMI/gene count") + theme(legend.position = "none") +
+  theme(axis.title=element_text(size = 10))
+ggsave(q, file = "Boxplot UMI divided by gene count raw data.svg")
+
+# If not significant Kruskal test
+q <- ggplot(data = XX001.2.3@meta.data, aes(x=integrated_snn_res.0.8, y=Phase, fill = integrated_snn_res.0.8)) + 
+  geom_boxplot() + 
+  stat_compare_means(method = "kruskal.test", label.y = "S", size = 2.5) +
+  theme_classic() + xlab("Cluster") + ylab("Phase") + theme(legend.position = "none") +
+  theme(axis.title=element_text(size = 10))
+ggsave(q, file = "Boxplot QC # of UMI's.svg")
+
+# Correlation plot of metadata characteristics
+DefaultAssay(object = XX001.2.3) <- "SCT"
+plot1 <- FeatureScatter(XX001.2.3, feature1 = "nCount_SCT", feature2 = "percent.mt")
+plot2 <- FeatureScatter(XX001.2.3, feature1 = "nCount_SCT", feature2 = "nFeature_SCT")
+plot3 <- FeatureScatter(XX001.2.3, feature1 = "nFeature_SCT", feature2 = "percent.ribo")
+pdf(file="XX001.2.3 correlation plot metadata.pdf", height = 14, width = 8)
+CombinePlots(plots = list(plot1, plot2, plot3), ncol = 1)
+dev.off()
+
+#### MAST test differential gene expression ####
+# Find all markers of group 1
+group1.markers <- FindMarkers(XX001.2.3, assay = 'RNA', ident.1 = 1, test.use = "MAST", min.pct = 0.10, 
+                              logfc.threshold = 0.25)
+# Find all markers of group 2
+group2.markers <- FindMarkers(XX001.2.3, assay = 'RNA', ident.1 = 2, test.use = "MAST", min.pct = 0.10, 
+                              logfc.threshold = 0.25)
+# Find all markers of group 3
+group3.markers <- FindMarkers(XX001.2.3, assay = 'RNA', ident.1 = 3, test.use = "MAST", min.pct = 0.10, 
+                              logfc.threshold = 0.25)
+# Find all markers of group 4
+group4.markers <- FindMarkers(XX001.2.3, assay = 'RNA', ident.1 = 4, test.use = "MAST", min.pct = 0.10, 
+                              logfc.threshold = 0.25)
+# Create list
+listDEgenes<-list('group1'=group1.markers,'group2'=group2.markers, 
+                  'group3'=group3.markers, 'group4'=group4.markers)
+# Add geneSymbol in column (for the export)
+listDEgenes<-lapply(listDEgenes,function(x){x<-cbind(x,'gene'=rownames(x))})
+# Filter on adj.P-value
+listDEgenes<-lapply(listDEgenes, function(x){dplyr::filter(x, p_val_adj<0.05)})
+# Sort on logFC
+listDEgenes<-lapply(listDEgenes,function(x){x<-x[order(x$avg_log2FC, decreasing=T),]})
+# Write to Excel
+write.xlsx(listDEgenes, file = "MAST XX001.2.3.xlsx")
+
+#### Conserved markers effector Tregs ####
+Cellstatus <- as.numeric(readLines("Cellstatus.txt"))
+XX001.2.3@meta.data$Cellstatus <- Cellstatus
+actXX001.2.3 <- XX001.2.3
+actXX001.2.3 <- SetIdent(actXX001.2.3, value = "Cellstatus")
+actconserved <- FindMarkers(actXX001.2.3, assay = 'RNA', ident.1 = 2, ident.2 = 1, test.use = "MAST", min.pct = 0.50, 
+                                     logfc.threshold = 0.25, min.diff.pct = 0.1)
+write.xlsx(actconserved, file = "MAST XX001.2.3 - activated Treg vs cluster 1 Tregs.xlsx", rowNames = TRUE)
+
+#### Heatmap cluster defining genes ####
+# Based on log2 fold change
+top10 <- Batchedmarkers.mast %>% group_by(cluster) %>% top_n(10, avg_log2FC)
+bottom10 <- Batchedmarkers.mast %>% group_by(cluster) %>% top_n(-10, avg_log2FC)
+# Based on p-value i
+top10p <- Batchedmarkers.mast %>% group_by(cluster) %>% top_n(10, p_val_adj) 
+bottom10p <- Batchedmarkers.mast %>% group_by(cluster) %>% top_n(-10, p_val_adj)
+
+heatmap <- XX001.2.3
+Idents(heatmap) <- factor(x = Idents(heatmap), levels = sort(levels(heatmap)))
+
+h <- DoHeatmap(
+  object = heatmap, group.bar = TRUE, label = FALSE,
+  features = as.character(top10$gene), angle = 0, 
+  assay = "SCT",
+  slot = "scale.data")
+h + theme(axis.text.y = element_text(size = 8))
+ggsave(h, file = "Heatmap top 10 identifying genes log2fc.svg", height = 16, width = 24)
+
+#### Projecting genes on UMAP ####
+clusterMatrix <-XX001.2.3@meta.data
+umapTable <-as.data.frame(XX001.2.3@reductions$umap@cell.embeddings, stringsAsFactors = F)
+logTable <-XX001.2.3@assays$SCT@data
+
+UMAP_1 <- XX001.2.3@reductions$umap@cell.embeddings[,1]
+UMAP_2 <- XX001.2.3@reductions$umap@cell.embeddings[,2]
+
+geneSymbol1 <- "gene" # Genes to be plotted
+
+p1 <- FeaturePlot(XX001.2.3, dims = c(1,2), features = "gene1", pt.size = 2, order = TRUE) +
+  ggtitle(paste0(geneSymbol1,": ",sum(logTable[geneSymbol1,]>0),
+                 " cells (",round(sum(logTable[geneSymbol1,]>0)/ncol(logTable)*100,2)," %)"))
+
+p2 <- FeaturePlot(XX001.2.3, dims = c(1,2), features = "gene2", pt.size = 2, order = TRUE) +
+    ggtitle(paste0(geneSymbol2,": ",sum(logTable[geneSymbol2,]>0),
+                 " cells (",round(sum(logTable[geneSymbol2,]>0)/ncol(logTable)*100,2)," %)"))
+
+p3 <- FeaturePlot(XX001.2.3, dims = c(1,2), features = "gene3", pt.size = 2, order = TRUE) +
+  ggtitle(paste0(geneSymbol3,": ",sum(logTable[geneSymbol3,]>0),
+                 " cells (",round(sum(logTable[geneSymbol3,]>0)/ncol(logTable)*100,2)," %)"))
+
+p4 <- FeaturePlot(XX001.2.3, dims = c(1,2), features = "gene4", pt.size = 2, order = TRUE) +
+  ggtitle(paste0(geneSymbol4,": ",sum(logTable[geneSymbol4,]>0),
+                 " cells (",round(sum(logTable[geneSymbol4,]>0)/ncol(logTable)*100,2)," %)"))
+
+p5 <- FeaturePlot(XX001.2.3, dims = c(1,2), features = "gene5", pt.size = 2, order = TRUE) +
+  ggtitle(paste0(geneSymbol5,": ",sum(logTable[geneSymbol5,]>0),
+                 " cells (",round(sum(logTable[geneSymbol5,]>0)/ncol(logTable)*100,2)," %)"))
+
+p6 <- FeaturePlot(XX001.2.3, dims = c(1,2), features = "gene6", pt.size = 2, order = TRUE) +
+  ggtitle(paste0(geneSymbol6,": ",sum(logTable[geneSymbol6,]>0),
+                 " cells (",round(sum(logTable[geneSymbol6,]>0)/ncol(logTable)*100,2)," %)"))
+ggsave(grid.arrange(p1, p2, p3, p4, p5, p6, ncol=3), file="UMAPs genes.svg", width = 15, height = 12)
+
+#### Projecting genes on UMAP plots using Nebulosa density ####
+# Controls for sparsity in single cell RNA-seq data
+# By smoothing the data, Nebulosa allows a better visualization of the global expression
+pn <- plot_density(XX001.2.3, c("CTLA4", "TIGIT", "FOXP3"), joint = TRUE, pt.size = 2)
+pn + plot_layout(ncol = 1)
+
+plot_density(XX001.2.3, c("GPR56", "CXCL13", "KLRB1", "BHLHE40"), joint = TRUE, size = 2,combine = FALSE)
+
+#### AUCell gene set enrichment ####
+exprMatrix <- as.matrix(XX001.2.3@assays$RNA@counts)
+dim(exprMatrix) 
+
+# Load gene sets
+genes <- readLines("DeSimone.txt")
+geneSets <- GeneSet(genes, setName="DeSimone")
+geneSets
+
+# Build the gene expression rankings
+cells_rankings <- AUcell_buildRankings(exprMatrix, nCores=1,
+                                       plotStats=TRUE)
+cells_rankings
+
+# Calculate enrichment for the gene signatures (AUC)
+cells_AUC <- AUcell_calcAUC(geneSets, cells_rankings)
+
+# Determine which cells express the given gene signature
+set.seed(123)
+par(mfrow=c(1,1))
+cells_assignment <- AUcell_exploreThresholds(cells_AUC, plotHist=TRUE, assign=TRUE)
+cells_assignment # cells per threshold parameter
+
+# Plotting the AUC histogram of a specific gene set, and setting a new threshold:
+geneSetName <- rownames(cells_AUC)[grep("DeSimone", rownames(cells_AUC))]
+AUcell_plotHist(cells_AUC[geneSetName,], aucThr=0.075)
+abline(v=0.075)
+
+# Extracting the AUC matrix
+matrix <- getAUC(cells_AUC)
+matrix <- t(matrix) 
+# Set the AUC values that fall below the cut-off to zero
+matrix[matrix < 0.04064081] <- NA
+count_if(gt(0.04064081), data = matrix[,1]) 
+
+# Add to metadata of Seurat object
+XX001.2.3 <- AddMetaData(object = XX001.2.3, metadata = matrix, col.name = "DeSimone")
+XX001.2.3@meta.data$DeSimone <- matrix
+
+# Plot UMAP colored on metadata of gene set enrichment
+u <- DimPlot(XX001.2.3, label= FALSE, group.by = "DeSimone", pt.size = 2, na.value = "lightgrey", cols = rev("heat.colors"(xxx)))  + NoLegend()
+ggsave(u, file = "UMAP GSEA DeSimone.svg", width = 9)
+
+# Proportion of AUcell NA/not NA values per cluster
+Cluster <- as.character(XX001.2.3$seurat_clusters)
+DeSimone <- XX001.2.3$DeSimone
+Test <- as.data.frame(cbind(Cluster, DeSimone))
+X <- split(Test, Test$Cluster)
+
+Cluster0 <- X$`0`
+colMeans(is.na(Cluster0))
+Cluster1 <- X$`1`
+colMeans(is.na(Cluster1))
+Cluster2 <- X$`2`
+colMeans(is.na(Cluster2))
+Cluster3 <- X$`3`
+colMeans(is.na(Cluster3))
+
+# Test if proportions of enrichment differ per cluster
+# Statistics non-numerical/qualitative values
+DeSimone <- XX001.2.3@meta.data$DeSimone
+DeSimone[!is.na(DeSimone)] <- 1
+DeSimone[is.na(DeSimone)] <- 0
+Cluster <- as.character(XX001.2.3@meta.data$seurat_clusters)
+chisq.test(DeSimone, Cluster)
+
+# For if no statistical comparison is needed
+length(DeSimone)
+sum(!is.na(DeSimone))
+100-(sum(is.na(DeSimone))/length(DeSimone))
+
+# One-way ANOVA if it's about the level of enrichment
+DeSimone <- XX001.2.3@meta.data$DeSimone
+DeSimone[is.na(DeSimone)] <- 0
+Cluster <- as.character(XX001.2.3@meta.data$seurat_clusters)
+Test <- as.data.frame(cbind(Cluster, DeSimone))
+# Compute the analysis of variance
+res.aov <- aov(DeSimone ~ Cluster, data = Test)
+summary(res.aov)
+# I significant perform post-hoc analysis
+TukeyHSD(res.aov)
+# Kruskal-Wallis test if the data follows a non-normal distribution
+kruskal.test(DeSimone ~ Cluster, data = Test)
+Test$DeSimone <- as.numeric(Test$DeSimone)
+pairwise.wilcox.test(Test$DeSimone, Test$Cluster,
+                     p.adjust.method = "BH")
+
+#### Monocle 3 - pseudotime trajectory analysis ####
+# Extract data from Seurat object
+gene_annotation <- as.data.frame(rownames(XX001.2.3@reductions[["pca"]]@feature.loadings),
+                                 row.names = rownames(XX001.2.3@reductions[["pca"]]@feature.loadings))
+colnames(gene_annotation) <- "gene_short_name"
+
+# Reading in cluster names to metadata
+Cluster <- as.numeric(readLines("Cluster.txt"))
+XX001.2.3@meta.data$Cluster <- Cluster
+cell_metadata <- as.data.frame(XX001.2.3@meta.data[, c(1:5, 8:10, 70)])
+cell_metadata$barcode <- rownames(cell_metadata)
+
+# Using raw data from SCT assay
+New_matrix <- XX001.2.3@assays$SCT@counts
+New_matrix <- New_matrix[rownames(XX001.2.3@reductions[["pca"]]@feature.loadings), ]
+expression_matrix <- New_matrix
+
+# Store data in a cell data object
+cds_from_seurat <- new_cell_data_set(xexpression_matrix,
+                                     cell_metadata = cell_metadata,
+                                     gene_metadata = gene_annotation)
+
+# Construct and assign the made up partition
+recreate.partition <- c(rep(1, length(cds_from_seurat@colData@rownames)))
+names(recreate.partition) <- cds_from_seurat@colData@rownames
+recreate.partition <- as.factor(recreate.partition)
+cds_from_seurat@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partition
+
+# Assign the cluster info
+XX001.2.3 <- SetIdent(XX001.2.3, value = "Cluster")
+list_cluster <- XX001.2.3@active.ident
+names(list_cluster) <- XX001.2.3@assays[["SCT"]]@data@Dimnames[[2]]
+cds_from_seurat@clusters@listData[["UMAP"]][["clusters"]] <- list_cluster
+
+# Could be a space-holder, but essentially fills out louvain parameters
+cds_from_seurat@clusters@listData[["UMAP"]][["louvain_res"]] <- "NA"
+
+# Assign UMAP coordinate
+cds_from_seurat@int_colData@listData$reducedDims@listData[["UMAP"]] <-XX001.2.3@reductions[["umap"]]@cell.embeddings
+
+# Assign feature loading for downstream module analysis
+cds_from_seurat@preprocess_aux$gene_loadings <- XX001.2.3@reductions[["pca"]]@feature.loadings
+
+# Learn graph
+cds_from_seurat <- learn_graph(cds_from_seurat, use_partition = T)
+cds_from_seu <- learn_graph(cds_from_seurat, use_partition = T, learn_graph_control = list(prune_graph = FALSE, rann.k = NULL, orthogonal_proj_tip = TRUE))
+
+# Color clusters according to Seurat cluster coloring
+#1         2         3         4 
+#"#F8766D" "#7CAE00" "#00BFC4" "#C77CFF" 
+
+mox <- plot_cells(cds_from_seurat,
+           color_cells_by = "cluster",
+           label_groups_by_cluster=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           cell_size = 0.75) +
+  scale_color_manual(values = c("#7CAE00","#F8766D", "#C77CFF", "#00BFC4")) # order of cluster appearance
+
+mox <- plot_cells(cds_from_seurat, 
+           color_cells_by = 'cluster',
+           label_groups_by_cluster=FALSE,
+           label_leaves=TRUE,
+           label_branch_points=TRUE,
+           graph_label_size=2,
+           trajectory_graph_segment_size = 0.5,
+           label_cell_groups = FALSE,
+           cell_size = 0.75) +
+  scale_color_manual(values = c("#7CAE00","#F8766D", "#C77CFF", "#00BFC4"))
+ggsave(mox, file = "Monocle-trajectory.svg")
+
+# Order cells & plot pseudotime
+# Helper function to identify the root principal points:
+get_earliest_principal_node <- function(cds_from_seurat, time_bin="1"){
+  cell_ids <- which(colData(cds_from_seurat)[, "Cluster"] == time_bin)
+  
+  closest_vertex <-
+    cds_from_seurat@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex
+  closest_vertex <- as.matrix(closest_vertex[colnames(cds_from_seurat), ])
+  root_pr_nodes <-
+    igraph::V(principal_graph(cds_from_seurat)[["UMAP"]])$name[as.numeric(names
+                                                              (which.max(table(closest_vertex[cell_ids,]))))]
+  
+  root_pr_nodes
+}
+cds_from_seurat <- order_cells(cds_from_seurat, root_pr_nodes=get_earliest_principal_node(cds_from_seurat))
+
+root <- plot_cells(cds_from_seurat,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5)
+ggsave(root, file = "Monocle3-pseudotime root node determined with helper function.svg")
+
+#### Output for pySCENIC analyses ####
+# Matrix of all cells - saved as exprMat
+exprMat <- as.matrix(XX001.2.3@assays$RNA@counts)
+write.table(exprMat, file = "exprMat.txt")
+write.csv(exprMat, file = "exprMat.csv")
+write.xlsx(exprMat, file = "exprMat.xlsx")
+
+# cellInfo - all metadata
+cellInfo <- XX001.2.3@meta.data
+write.table(cellInfo, file = "cellInfo.txt")
+write.csv(cellInfo, file = "cellInfo.csv")
+write.xlsx(cellInfo, file = "cellInfo.xlsx")
+
+# PCA coordinates to load in Loom object for plotting the regulons
+pcacoor <- XX001.2.3@reductions$pca@cell.embeddings
+write.table(pcacoor, file = "pcacoor.txt")
+write.csv(pcacoor, file = "pcacoor.csv")
+
+# tSNE coordinates to load in Loom object for plotting the regulons
+SXX001.2.3 <- RunTSNE(XX001.2.3, reduction = "pca", dims = 1:30, tsne.method = "Rtsne")
+TSNEPlot(SXX001.2.3)
+tSNEcoor <- SXX001.2.3@reductions$tsne@cell.embeddings
+write.table(tSNEcoor, file = "tSNEcoor.txt")
+write.csv(tSNEcoor, file = "tSNEcoor.csv")
+
+# UMAP coordinates to load in Loom object for plotting the regulons
+umapcoor <- XX001.2.3@reductions$umap@cell.embeddings
+write.table(umapcoor, file = "umapcoor.txt")
+write.csv(umapcoor, file = "umapcoor.csv")
+
+## Run pySCENIC on python with Jupyter notebook
+
+
+
